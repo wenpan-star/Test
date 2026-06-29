@@ -1,9 +1,9 @@
 <!--
 ====================================================================================
- 静谧·密钥 v4.1.0 — 安全深度修复与结构优化版
+ 静谧·密钥 v4.3.0 — 安全深度修复与结构优化版
  更新日期：2026-06-29
 ====================================================================================
- 更新内容（v4.0.0 → v4.1.0）：
+ 更新内容（v4.0.0 → v4.3.0）：
  1. 【安全】编辑模态框中密码字段不再直接写入 value，仅在显示时动态填充并立即可清除。
  2. 【安全】escapeAttr 增加单引号转义，防止属性注入。
  3. 【修复】清理 renderApp 中重复绑定的全局事件监听器（导出下拉、主题下拉），采用命名函数和 AbortController 防止内存泄漏。
@@ -27,7 +27,7 @@
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
-    <title>🔐 静谧·密钥 | 安全密码本 v4.1.0</title>
+    <title>🔐 静谧·密钥 | 安全密码本 v4.3.0</title>
     <style>
         /* ===================== 完整 CSS（卡片式布局 + 全量优化） ===================== */
         :root {
@@ -1037,7 +1037,7 @@
 (function() {
     // ===================== 常量与配置 =====================
     const CONFIG = {
-        APP_VERSION: '4.1.0',
+        APP_VERSION: '4.3.0',
         STORAGE_VAULT: 'serene_vault_enc_v3',
         STORAGE_SALT: 'serene_vault_salt_v3',
         STORAGE_AUTH: 'serene_vault_auth_v3',
@@ -1474,27 +1474,32 @@
         State.bruteFailCount = 0;
         updateSecurityState({ bruteFailCount: 0, lockoutUntil: 0 });
 
-        if (State.channel) State.channel.close();
-        State.channel = new BroadcastChannel('serene_vault_sync');
-        State.channel.onmessage = async function(event) {
-            if (event.data && event.data.type === 'vaultUpdated') {
-                try {
-                    const vaultRawReload = localStorage.getItem(CONFIG.STORAGE_VAULT);
-                    if (!vaultRawReload) return;
-                    const decryptedReload = await CryptoModule.decrypt(State.masterKey, JSON.parse(vaultRawReload));
-                    State.passwords = decryptedReload.passwords || [];
-                    State.customCategories = decryptedReload.customCategories || [];
-                    if (!State.customCategories.length) State.customCategories = ['E-Mail','工作','社交','银行','购物','娱乐','其他'];
-                    migrateOldData();
-                    State.rebuildIndex();
-                    if (typeof renderListOnly === 'function') renderListOnly();
-                    if (typeof refreshDatalist === 'function') refreshDatalist();
-                    showToast('🔄 数据已从另一窗口同步');
-                } catch (error) {
-                    console.warn('同步失败:', error);
+        if (State.channel) {
+            State.channel.close();
+            State.channel = null;
+        }
+        if (typeof BroadcastChannel !== 'undefined') {
+            State.channel = new BroadcastChannel('serene_vault_sync');
+            State.channel.onmessage = async function(event) {
+                if (event.data && event.data.type === 'vaultUpdated') {
+                    try {
+                        const vaultRawReload = localStorage.getItem(CONFIG.STORAGE_VAULT);
+                        if (!vaultRawReload) return;
+                        const decryptedReload = await CryptoModule.decrypt(State.masterKey, JSON.parse(vaultRawReload));
+                        State.passwords = decryptedReload.passwords || [];
+                        State.customCategories = decryptedReload.customCategories || [];
+                        if (!State.customCategories.length) State.customCategories = ['E-Mail','工作','社交','银行','购物','娱乐','其他'];
+                        migrateOldData();
+                        State.rebuildIndex();
+                        if (typeof renderListOnly === 'function') renderListOnly();
+                        if (typeof refreshDatalist === 'function') refreshDatalist();
+                        showToast('🔄 数据已从另一窗口同步');
+                    } catch (error) {
+                        console.warn('同步失败:', error);
+                    }
                 }
-            }
-        };
+            };
+        }
 
         addLog('登录','成功解锁');
         startIdleMonitor();
@@ -2051,6 +2056,27 @@
         if (firstInput) firstInput.focus();
 
         const closeModal = function() {
+            // 重置密码输入框和按钮状态，防止取消后残留明文
+            const loginPwInput = modal.querySelector('#editLoginPw');
+            if (loginPwInput) {
+                loginPwInput.type = 'password';
+                loginPwInput.value = '';
+            }
+            const toggleLoginBtn = modal.querySelector('#toggleEditLoginVis');
+            if (toggleLoginBtn) {
+                toggleLoginBtn.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                toggleLoginBtn.setAttribute('aria-label', '显示登录密码');
+            }
+            const tranPwInput = modal.querySelector('#editTranPw');
+            if (tranPwInput) {
+                tranPwInput.type = 'password';
+                tranPwInput.value = '';
+            }
+            const toggleTranBtn = modal.querySelector('#toggleEditTranVis');
+            if (toggleTranBtn) {
+                toggleTranBtn.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                toggleTranBtn.setAttribute('aria-label', '显示交易密码');
+            }
             modal.remove();
             document.body.classList.remove('modal-open');
             if (previousFocus && typeof previousFocus.focus === 'function') {
@@ -2066,22 +2092,34 @@
         // 初始计算强度（空密码）
         editLoginPwInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // 密码可见性切换：初始不暴露明文，用户未编辑时填充原始密码，隐藏时不清空以保留编辑
+        // 密码可见性切换：引入 dirty 标记，隐藏时清空 value 保证安全，保存时根据标记决定是否回退
         const originalLoginPassword = item.loginPassword;
         const originalTransactionPassword = item.transactionPassword;
+        let loginDirty = false;
+        let tranDirty = false;
+
+        editLoginPwInput.addEventListener('input', function() {
+            loginDirty = true;
+        });
+        modal.querySelector('#editTranPw').addEventListener('input', function() {
+            tranDirty = true;
+        });
 
         modal.querySelector('#toggleEditLoginVis').onclick = function() {
             if (editLoginPwInput.type === 'password') {
-                // 显示：如果当前为空，填入原始密码
-                if (!editLoginPwInput.value) {
+                // 显示：若未修改过，填入原始密码
+                if (!loginDirty) {
                     editLoginPwInput.value = originalLoginPassword;
                 }
                 editLoginPwInput.type = 'text';
                 this.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
                 this.setAttribute('aria-label', '隐藏登录密码');
             } else {
-                // 隐藏：只切换类型，不清空值
+                // 隐藏：仅当未修改时才清空 value，已修改时保留用户输入避免丢失
                 editLoginPwInput.type = 'password';
+                if (!loginDirty) {
+                    editLoginPwInput.value = '';
+                }
                 this.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
                 this.setAttribute('aria-label', '显示登录密码');
             }
@@ -2090,14 +2128,18 @@
         modal.querySelector('#toggleEditTranVis').onclick = function() {
             const tranInput = modal.querySelector('#editTranPw');
             if (tranInput.type === 'password') {
-                if (!tranInput.value) {
+                if (!tranDirty) {
                     tranInput.value = originalTransactionPassword;
                 }
                 tranInput.type = 'text';
                 this.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
                 this.setAttribute('aria-label', '隐藏交易密码');
             } else {
+                // 隐藏：仅当未修改时才清空 value，已修改时保留用户输入避免丢失
                 tranInput.type = 'password';
+                if (!tranDirty) {
+                    tranInput.value = '';
+                }
                 this.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
                 this.setAttribute('aria-label', '显示交易密码');
             }
@@ -2110,8 +2152,15 @@
 
         modal.querySelector('#saveEdit').onclick = async function() {
             const newName = modal.querySelector('#editName').value.trim();
-            const newLoginPassword = editLoginPwInput.value.trim();
-            const newTransactionPassword = modal.querySelector('#editTranPw').value.trim();
+            // 若用户从未修改（未 dirty），且当前为空，回退到原始值
+            let newLoginPassword = editLoginPwInput.value.trim();
+            if (!loginDirty && !newLoginPassword) {
+                newLoginPassword = originalLoginPassword;
+            }
+            let newTransactionPassword = modal.querySelector('#editTranPw').value.trim();
+            if (!tranDirty && !newTransactionPassword) {
+                newTransactionPassword = originalTransactionPassword;
+            }
             if (!newName || !newLoginPassword) return showToast('名称和登录密码不能为空', true);
             if (newLoginPassword.length < CONFIG.LOGIN_PW_MIN || newLoginPassword.length > CONFIG.LOGIN_PW_MAX) return showToast(`登录密码需${CONFIG.LOGIN_PW_MIN}-${CONFIG.LOGIN_PW_MAX}位`, true);
             if (newTransactionPassword && !/^\d{6}$/.test(newTransactionPassword)) return showToast('交易密码必须为6位数字', true);
@@ -2515,7 +2564,7 @@
         modal.innerHTML = `
             <div class="modal-card">
                 <h3><svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-log"/></svg> 操作日志</h3>
-                <div class="log-view">${logs.length ? logs.map(function(log) { return `<div>${log.time} | ${log.action} | ${log.details}</div>`; }).join('') : '暂无日志记录'}</div>
+                <div class="log-view">${logs.length ? logs.map(function(log) { return `<div>${Util.escapeHtml(log.time)} | ${Util.escapeHtml(log.action)} | ${Util.escapeHtml(log.details)}</div>`; }).join('') : '暂无日志记录'}</div>
                 <div class="button-group">
                     <button id="clearLogBtn" class="btn btn-outline btn-sm"><svg class="icon"><use href="#icon-trash"/></svg> 清空</button>
                     <button id="exportLogBtn" class="btn btn-outline btn-sm"><svg class="icon"><use href="#icon-download"/></svg> 导出</button>
@@ -2526,7 +2575,7 @@
         document.body.classList.add('modal-open');
         const refreshLogs = function() {
             const newLogs = JSON.parse(localStorage.getItem(CONFIG.LOG_STORAGE) || '[]');
-            modal.querySelector('.log-view').innerHTML = newLogs.length ? newLogs.map(function(log) { return `<div>${log.time} | ${log.action} | ${log.details}</div>`; }).join('') : '暂无日志记录';
+            modal.querySelector('.log-view').innerHTML = newLogs.length ? newLogs.map(function(log) { return `<div>${Util.escapeHtml(log.time)} | ${Util.escapeHtml(log.action)} | ${Util.escapeHtml(log.details)}</div>`; }).join('') : '暂无日志记录';
         };
         modal.querySelector('#closeLog').onclick = function() { modal.remove(); document.body.classList.remove('modal-open'); };
         modal.querySelector('#exportLogBtn').onclick = function() {
@@ -2909,14 +2958,36 @@
             const input = document.getElementById('inpLoginPw');
             const button = document.getElementById('toggleLoginPwVis');
             if (input && button) {
-                toggleEditPasswordVisibility(input, button);
+                if (input.type === 'password') {
+                    // 显示：保留当前已输入的值
+                    input.type = 'text';
+                    button.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
+                    button.setAttribute('aria-label', '隐藏登录密码');
+                } else {
+                    // 隐藏并清空（避免明文残留）
+                    input.type = 'password';
+                    input.value = '';
+                    button.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                    button.setAttribute('aria-label', '显示登录密码');
+                }
+                input.focus();
             }
         };
         document.getElementById('toggleTranPwVis').onclick = function() {
             const input = document.getElementById('inpTranPw');
             const button = document.getElementById('toggleTranPwVis');
             if (input && button) {
-                toggleEditPasswordVisibility(input, button);
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    button.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
+                    button.setAttribute('aria-label', '隐藏交易密码');
+                } else {
+                    input.type = 'password';
+                    input.value = '';
+                    button.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                    button.setAttribute('aria-label', '显示交易密码');
+                }
+                input.focus();
             }
         };
 
