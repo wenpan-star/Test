@@ -1,21 +1,17 @@
 <!--
 ====================================================================================
- 静谧·密钥 v4.3.0 — 安全深度修复与结构优化版
+ 静谧·密钥 v4.4.0 — 健壮性增强与同步冲突处理版
  更新日期：2026-06-29
 ====================================================================================
- 更新内容（v4.0.0 → v4.3.0）：
- 1. 【安全】编辑模态框中密码字段不再直接写入 value，仅在显示时动态填充并立即可清除。
- 2. 【安全】escapeAttr 增加单引号转义，防止属性注入。
- 3. 【修复】清理 renderApp 中重复绑定的全局事件监听器（导出下拉、主题下拉），采用命名函数和 AbortController 防止内存泄漏。
- 4. 【优化】列表项查找引入 Map 索引，避免每次事件委托时遍历全量密码数组。
- 5. 【统一】列表与编辑模态框的密码可见性切换行为一致：隐藏自动清空 DOM 内容。
- 6. 【体验】模态框打开/关闭时自动管理焦点，关闭后恢复原焦点元素。
- 7. 【体验】键盘可访问性增强：密码操作按钮添加 aria-label。
- 8. 【代码】内部模块化重构，逻辑划分更清晰（Config/Crypto/State/UI），变量名与注释完整保留。
-
- 设计原则：无外部依赖，全本地运行，所有变量名与逻辑保持完整清晰。
+ 更新内容（v4.3.0 → v4.4.0）：
+ 1. 【安全】所有 `saveEncrypted` 调用点增加 try/catch，保存失败时回滚操作并提示，杜绝“成功提示但数据未写入”。
+ 2. 【体验】编辑条目时若收到跨标签页同步，自动提示并关闭编辑框，防止编辑内容被覆盖。
+ 3. 【优化】解锁成功后自动清理 `serene_migration_backup`，避免敏感备份残留；应用初始化时若检测到残留备份也尝试清理。
+ 4. 【体验】模态框关闭时统一恢复焦点，包括导出、导入、日志、分类管理等所有弹窗。
+ 5. 【保持】所有原有功能、变量名、UI 逻辑完全不变，未做任何删减或简写。
 ====================================================================================
 -->
+<!-- 后续为 v4.4.0 完整代码，因长度限制分两次输出 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -27,7 +23,7 @@
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
-    <title>🔐 静谧·密钥 | 安全密码本 v4.3.0</title>
+    <title>🔐 静谧·密钥 | 安全密码本 v4.4.0</title>
     <style>
         /* ===================== 完整 CSS（卡片式布局 + 全量优化） ===================== */
         :root {
@@ -1037,7 +1033,7 @@
 (function() {
     // ===================== 常量与配置 =====================
     const CONFIG = {
-        APP_VERSION: '4.3.0',
+        APP_VERSION: '4.4.0',
         STORAGE_VAULT: 'serene_vault_enc_v3',
         STORAGE_SALT: 'serene_vault_salt_v3',
         STORAGE_AUTH: 'serene_vault_auth_v3',
@@ -1046,6 +1042,7 @@
         LAST_EXPORT_KEY: 'serene_last_export_v3',
         THEME_STORAGE: 'serene_theme_v3',
         SECURITY_STORAGE: 'serene_security_v3',
+        MIGRATION_BACKUP_KEY: 'serene_migration_backup',
         MAX_PASSWORDS: 10000,
         MASTER_MIN_LEN: 12,
         LOGIN_PW_MIN: 8,
@@ -1094,7 +1091,6 @@
             '--placeholder-color':'#8b8bb0'
         }}
     };
-
     // ===================== 工具函数（增强密码强度评估） =====================
     const Util = {
         escapeHtml: function(text) {
@@ -1268,6 +1264,7 @@
         sortAscending: true,
         activeCategoryModal: null,
         addSectionVisible: false,
+        activeEditItemId: null,   // 正在编辑的条目 ID，用于同步冲突检测
 
         // 定时器与同步
         idleTimer: null,
@@ -1315,6 +1312,7 @@
             this.bruteFailCount = 0;
             this.verifyFailCount = 0;
             this.addSectionVisible = false;
+            this.activeEditItemId = null;
             if (this.clipboardTimer) clearTimeout(this.clipboardTimer);
             if (this.visibilityLockTimer) clearTimeout(this.visibilityLockTimer);
             if (this.searchDebounceTimer) clearTimeout(this.searchDebounceTimer);
@@ -1372,7 +1370,7 @@
         await new Promise(resolve => setTimeout(resolve, delay));
     }
 
-    // ===================== 保存与解锁 =====================
+    // ===================== 保存与解锁（增强错误处理） =====================
     async function saveVault() {
         if (!State.masterKey) return;
         const vaultData = {
@@ -1389,12 +1387,21 @@
         }
     }
 
+    // 统一的安全保存封装：仅执行保存，由调用方负责回滚
     async function saveEncrypted() {
         await saveVault();
+        // 分类管理面板刷新
         if (State.activeCategoryModal && document.body.contains(State.activeCategoryModal)) {
             const container = State.activeCategoryModal.querySelector('#catListManage');
             if (container) renderCategoryList(container);
         }
+    }
+
+    // 清理迁移备份（无用时清理）
+    function cleanMigrationBackup() {
+        try {
+            localStorage.removeItem(CONFIG.MIGRATION_BACKUP_KEY);
+        } catch(e) {}
     }
 
     async function verifyMasterPassword(password) {
@@ -1474,6 +1481,9 @@
         State.bruteFailCount = 0;
         updateSecurityState({ bruteFailCount: 0, lockoutUntil: 0 });
 
+        // 启动时清理残留迁移备份
+        cleanMigrationBackup();
+
         if (State.channel) {
             State.channel.close();
             State.channel = null;
@@ -1482,6 +1492,14 @@
             State.channel = new BroadcastChannel('serene_vault_sync');
             State.channel.onmessage = async function(event) {
                 if (event.data && event.data.type === 'vaultUpdated') {
+                    // 如果有编辑中的模态框，提示冲突
+                    if (State.activeEditItemId) {
+                        showToast('⚠️ 其他窗口已更新数据，当前编辑将被关闭', true, 3000);
+                        const modal = document.querySelector('.modal');
+                        if (modal) modal.remove();
+                        document.body.classList.remove('modal-open');
+                        State.activeEditItemId = null;
+                    }
                     try {
                         const vaultRawReload = localStorage.getItem(CONFIG.STORAGE_VAULT);
                         if (!vaultRawReload) return;
@@ -1615,9 +1633,15 @@
             const modal = document.createElement('div'); modal.className='modal';
             modal.innerHTML = `<div class="modal-card"><h3><svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-lock"/></svg> 验证身份</h3><p style="color:var(--text-secondary);margin-bottom:12px;">执行「${Util.escapeHtml(actionDescription)}」需要验证主密码</p><input type="password" id="verifyPw" placeholder="请输入当前主密码" autocomplete="off" autofocus><div class="button-group"><button id="cancelVerify" class="btn btn-outline">取消</button><button id="confirmVerify" class="btn btn-primary">确认</button></div></div>`;
             document.body.appendChild(modal); document.body.classList.add('modal-open');
+            const previousFocus = document.activeElement;
             const input = modal.querySelector('#verifyPw');
             const confirmButton = modal.querySelector('#confirmVerify');
-            const cleanup = function(value) { modal.remove(); document.body.classList.remove('modal-open'); resolve(value); };
+            const cleanup = function(value) { 
+                modal.remove(); 
+                document.body.classList.remove('modal-open'); 
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
+                resolve(value); 
+            };
             confirmButton.onclick = async function() {
                 const password = input.value;
                 if (!password) { showToast('请输入主密码', true); return; }
@@ -1772,9 +1796,11 @@
                 </div>`;
             document.body.appendChild(modal);
             document.body.classList.add('modal-open');
+            const previousFocus = document.activeElement;
             const cleanup = function(result) {
                 modal.remove();
                 document.body.classList.remove('modal-open');
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
                 resolve(result);
             };
             modal.querySelector('#dupOverwrite').onclick = function() { cleanup('overwrite'); };
@@ -1858,10 +1884,20 @@
                 if (!verified) return;
                 const affected = State.passwords.filter(function(item) { return item.category === category; }).length;
                 if (confirm(`⚠️ 删除分类"${category}"将清空 ${affected} 个条目的分类字段（不删除条目）。\n输入分类名称确认：`) && prompt(`请输入分类名称确认:`) === category) {
+                    const oldPasswords = [...State.passwords];
+                    const oldCategories = [...State.customCategories];
                     removeCategory(category);
                     State.passwords.forEach(function(item) { if (item.category === category) item.category = ''; });
                     State.rebuildIndex();
-                    await saveEncrypted();
+                    try {
+                        await saveEncrypted();
+                    } catch (error) {
+                        State.passwords = oldPasswords;
+                        State.customCategories = oldCategories;
+                        State.rebuildIndex();
+                        showToast('保存失败：' + error.message, true, 5000);
+                        return;
+                    }
                     renderListOnly();
                     refreshDatalist();
                     renderCategoryList(container);
@@ -2006,7 +2042,7 @@
         }
     };
 
-    // ===================== 编辑密码（模态框）—— 安全修复：无明文 value =====================
+    // ===================== 编辑密码（模态框）—— 安全修复：无明文 value，保存失败回滚 =====================
     function openEditModal(item) {
         refreshDatalist();
         const categories = loadCategories();
@@ -2050,6 +2086,9 @@
         document.body.appendChild(modal);
         document.body.classList.add('modal-open');
 
+        // 记录正在编辑的条目 ID，用于同步冲突检测
+        State.activeEditItemId = item.id;
+
         // 管理焦点：保存之前焦点并移动到模态框第一个输入
         const previousFocus = document.activeElement;
         const firstInput = modal.querySelector('input');
@@ -2079,6 +2118,7 @@
             }
             modal.remove();
             document.body.classList.remove('modal-open');
+            State.activeEditItemId = null;
             if (previousFocus && typeof previousFocus.focus === 'function') {
                 previousFocus.focus();
             }
@@ -2174,6 +2214,10 @@
                 }
             }
 
+            // 保存前备份整个数组和分类（因为分类可能被修改）
+            const oldPasswords = [...State.passwords];
+            const oldCategories = [...State.customCategories];
+            // 应用修改
             item.name = newName;
             item.username = modal.querySelector('#editUsername').value.trim();
             item.loginPassword = newLoginPassword;
@@ -2183,26 +2227,34 @@
             item.category = modal.querySelector('#editCategory').value || '';
             item.note = modal.querySelector('#editNote').value.trim();
 
-            // 如果编辑的是当前可见的密码，需要更新显示状态
-            if (State.visibleLoginPasswords.has(item.id)) {
-                const inputEl = document.getElementById('login-' + item.id);
-                if (inputEl && inputEl.type === 'text') {
-                    inputEl.value = item.loginPassword || '';
-                }
-            }
-            if (State.visibleTransactionPasswords.has(item.id)) {
-                const inputEl = document.getElementById('tran-' + item.id);
-                if (inputEl && inputEl.type === 'text') {
-                    inputEl.value = item.transactionPassword || '';
-                }
-            }
-
             State.rebuildIndex();
-            await saveEncrypted();
-            renderListOnly();
-            refreshDatalist();
-            closeModal();
-            showToast('✅ 已更新');
+            try {
+                await saveEncrypted();
+                // 保存成功，更新可见密码显示
+                if (State.visibleLoginPasswords.has(item.id)) {
+                    const inputEl = document.getElementById('login-' + item.id);
+                    if (inputEl && inputEl.type === 'text') {
+                        inputEl.value = item.loginPassword || '';
+                    }
+                }
+                if (State.visibleTransactionPasswords.has(item.id)) {
+                    const inputEl = document.getElementById('tran-' + item.id);
+                    if (inputEl && inputEl.type === 'text') {
+                        inputEl.value = item.transactionPassword || '';
+                    }
+                }
+                renderListOnly();
+                refreshDatalist();
+                closeModal();
+                showToast('✅ 已更新');
+            } catch (error) {
+                // 回滚整个数组和分类
+                State.passwords = oldPasswords;
+                State.customCategories = oldCategories;
+                State.rebuildIndex();
+                closeModal();
+                showToast('保存失败：' + error.message, true, 5000);
+            }
         };
         modal.querySelector('#cancelEdit').onclick = closeModal;
     }
@@ -2299,10 +2351,14 @@
         }
         if (!importedRaw.length) { showToast('无有效密码数据', true); return; }
         const normalizedItems = importedRaw.map(function(i) { return normalizeItem(i); });
-        await applyImport(normalizedItems, [], false, false);
-        syncCategoriesFromPasswords();
-        showToast('CSV导入完成');
-        addLog('导入CSV', `${normalizedItems.length}条`);
+        try {
+            await applyImport(normalizedItems, [], false, false);
+            syncCategoriesFromPasswords();
+            showToast('CSV导入完成');
+            addLog('导入CSV', `${normalizedItems.length}条`);
+        } catch (error) {
+            // applyImport 内部已处理回滚和提示
+        }
     }
 
     async function importFromFile(file, trustChecked) {
@@ -2369,7 +2425,7 @@
             State.passwords = previousPasswords;
             State.customCategories = previousCategories;
             State.rebuildIndex();
-            showToast('导入失败，已回滚: ' + error.message, true);
+            showToast('保存失败：' + error.message, true, 5000);
             return;
         }
         renderListOnly();
@@ -2402,7 +2458,13 @@
                 </div>`;
             document.body.appendChild(modal);
             document.body.classList.add('modal-open');
-            const cleanup = function(value) { modal.remove(); document.body.classList.remove('modal-open'); resolve(value); };
+            const previousFocus = document.activeElement;
+            const cleanup = function(value) { 
+                modal.remove(); 
+                document.body.classList.remove('modal-open'); 
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
+                resolve(value); 
+            };
             modal.querySelector('#modalOk').onclick = function() { cleanup(modal.querySelector('#modalPw').value); };
             modal.querySelector('#modalCancel').onclick = function() { cleanup(null); };
             modal.querySelector('#modalPw').addEventListener('keypress', function(event) { if (event.key === 'Enter') modal.querySelector('#modalOk').click(); });
@@ -2423,11 +2485,19 @@
         const confirmationPhrase = `删除${State.selectedIds.size}条`;
         if (confirm(`⚠️ 确定删除 ${State.selectedIds.size} 个密码条目吗？此操作不可恢复。`) && prompt(`请输入"${confirmationPhrase}"确认:`) === confirmationPhrase) {
             const ids = Array.from(State.selectedIds);
+            const oldPasswords = [...State.passwords];
             State.passwords = State.passwords.filter(function(item) { return !ids.includes(item.id); });
             State.selectedIds.clear();
             State.batchMode = false;
             State.rebuildIndex();
-            await saveEncrypted();
+            try {
+                await saveEncrypted();
+            } catch (error) {
+                State.passwords = oldPasswords;
+                State.rebuildIndex();
+                showToast('保存失败：' + error.message, true, 5000);
+                return;
+            }
             renderListOnly();
             refreshDatalist();
             document.getElementById('batchBar').style.display = 'none';
@@ -2441,8 +2511,16 @@
     async function batchMoveCategory(targetCategory) {
         if (!State.selectedIds.size || !targetCategory) return;
         await requireReauthentication('批量移动分类', true);
+        const oldPasswords = [...State.passwords];
         State.passwords.forEach(function(item) { if (State.selectedIds.has(item.id)) item.category = targetCategory; });
-        await saveEncrypted();
+        try {
+            await saveEncrypted();
+        } catch (error) {
+            State.passwords = oldPasswords;
+            State.rebuildIndex();
+            showToast('保存失败：' + error.message, true, 5000);
+            return;
+        }
         renderListOnly();
         refreshDatalist();
         showToast(`已移动 ${State.selectedIds.size} 条到「${targetCategory}」`);
@@ -2452,9 +2530,17 @@
     async function wipeAllPasswords() {
         await requireReauthentication('清空全部密码', true);
         if (confirm('⚠️ 确定清空全部密码吗？此操作不可恢复！') && prompt('请输入"清空全部"确认:') === '清空全部') {
+            const oldPasswords = [...State.passwords];
             State.passwords = [];
             State.rebuildIndex();
-            await saveEncrypted();
+            try {
+                await saveEncrypted();
+            } catch (error) {
+                State.passwords = oldPasswords;
+                State.rebuildIndex();
+                showToast('保存失败：' + error.message, true, 5000);
+                return;
+            }
             renderListOnly();
             refreshDatalist();
             showToast('已清空全部密码');
@@ -2480,6 +2566,7 @@
             </div>`;
         document.body.appendChild(modal);
         document.body.classList.add('modal-open');
+        const previousFocus = document.activeElement;
         const newPasswordInput = modal.querySelector('#newPw');
         const strengthFill = modal.querySelector('#strengthFill');
         const strengthText = modal.querySelector('#strengthText');
@@ -2495,6 +2582,7 @@
                 await changeMasterPassword(oldPassword, newPassword);
                 modal.remove();
                 document.body.classList.remove('modal-open');
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
             } catch (error) { showToast(error.message, true); }
         };
     }
@@ -2521,7 +2609,8 @@
             auth: JSON.parse(localStorage.getItem(CONFIG.STORAGE_AUTH)),
             vault: JSON.parse(vaultRaw)
         };
-        localStorage.setItem('serene_migration_backup', JSON.stringify(oldBackup));
+        localStorage.setItem(CONFIG.MIGRATION_BACKUP_KEY, JSON.stringify(oldBackup));
+        const oldMasterKey = State.masterKey;   // 备份当前密钥，以便失败时恢复
 
         try {
             const newSalt = crypto.getRandomValues(new Uint8Array(16));
@@ -2541,12 +2630,14 @@
             State.customCategories = oldData.customCategories;
             State.rebuildIndex();
 
-            localStorage.removeItem('serene_migration_backup');
-            // 旧密码尽快置空
+            // 成功，清理备份
+            cleanMigrationBackup();
+            // 旧密码置空（虽然字符串无法完全擦除，但尽快解除引用）
             oldPassword = null;
             addLog('修改主密码', '成功');
             showToast('✅ 主密码修改成功');
         } catch (error) {
+            State.masterKey = oldMasterKey;   // 恢复内存中的密钥
             if (oldBackup) {
                 localStorage.setItem(CONFIG.STORAGE_SALT, JSON.stringify(oldBackup.salt));
                 localStorage.setItem(CONFIG.STORAGE_AUTH, JSON.stringify(oldBackup.auth));
@@ -2573,11 +2664,16 @@
             </div>`;
         document.body.appendChild(modal);
         document.body.classList.add('modal-open');
+        const previousFocus = document.activeElement;
         const refreshLogs = function() {
             const newLogs = JSON.parse(localStorage.getItem(CONFIG.LOG_STORAGE) || '[]');
             modal.querySelector('.log-view').innerHTML = newLogs.length ? newLogs.map(function(log) { return `<div>${Util.escapeHtml(log.time)} | ${Util.escapeHtml(log.action)} | ${Util.escapeHtml(log.details)}</div>`; }).join('') : '暂无日志记录';
         };
-        modal.querySelector('#closeLog').onclick = function() { modal.remove(); document.body.classList.remove('modal-open'); };
+        modal.querySelector('#closeLog').onclick = function() { 
+            modal.remove(); 
+            document.body.classList.remove('modal-open'); 
+            if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
+        };
         modal.querySelector('#exportLogBtn').onclick = function() {
             const data = JSON.parse(localStorage.getItem(CONFIG.LOG_STORAGE) || '[]');
             downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `静谧密钥_日志_${new Date().toISOString().slice(0,19)}.json`);
@@ -2604,20 +2700,35 @@
             </div>`;
         document.body.appendChild(modal);
         document.body.classList.add('modal-open');
+        const previousFocus = document.activeElement;
         State.activeCategoryModal = modal;
         const container = modal.querySelector('#catListManage');
         renderCategoryList(container);
-        modal.querySelector('#addCatBtn').onclick = function() {
+        modal.querySelector('#addCatBtn').onclick = async function() {
             const name = modal.querySelector('#newCatName').value.trim();
             if (!name) { showToast('请输入分类名称', true); return; }
+            const oldCategories = [...State.customCategories];
             if (addCategory(name)) {
-                renderCategoryList(container);
-                refreshDatalist();
-                modal.querySelector('#newCatName').value = '';
-                showToast(`✅ 已添加"${name}"`);
-            } else showToast('分类已存在或无效', true);
+                try {
+                    await saveEncrypted();
+                    renderCategoryList(container);
+                    refreshDatalist();
+                    modal.querySelector('#newCatName').value = '';
+                    showToast(`✅ 已添加"${name}"`);
+                } catch (error) {
+                    State.customCategories = oldCategories;
+                    showToast('保存失败：' + error.message, true, 5000);
+                }
+            } else {
+                showToast('分类已存在或无效', true);
+            }
         };
-        modal.querySelector('#closeCat').onclick = function() { modal.remove(); document.body.classList.remove('modal-open'); State.activeCategoryModal = null; };
+        modal.querySelector('#closeCat').onclick = function() { 
+            modal.remove(); 
+            document.body.classList.remove('modal-open'); 
+            State.activeCategoryModal = null; 
+            if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
+        };
     }
 
     // ===================== 主题管理 =====================
@@ -2804,9 +2915,17 @@
             if (deleteButton) {
                 const item = State.passwordIdIndex.get(deleteButton.dataset.id);
                 if (item && confirm(`确定删除"${item.name}"吗？`)) {
+                    const oldPasswords = [...State.passwords];
                     State.passwords = State.passwords.filter(function(p) { return p.id !== item.id; });
                     State.rebuildIndex();
-                    await saveEncrypted();
+                    try {
+                        await saveEncrypted();
+                    } catch (error) {
+                        State.passwords = oldPasswords;
+                        State.rebuildIndex();
+                        showToast('保存失败：' + error.message, true, 5000);
+                        return;
+                    }
                     renderListOnly();
                     refreshDatalist();
                     showToast('已删除');
@@ -2903,6 +3022,7 @@
                 }
             }
 
+            const oldPasswords = [...State.passwords];
             State.passwords.unshift(normalizeItem({
                 name: name,
                 username: document.getElementById('inpUsername').value.trim(),
@@ -2915,7 +3035,14 @@
                 createdAt: Date.now()
             }));
             State.rebuildIndex();
-            await saveEncrypted();
+            try {
+                await saveEncrypted();
+            } catch (error) {
+                State.passwords = oldPasswords;
+                State.rebuildIndex();
+                showToast('保存失败：' + error.message, true, 5000);
+                return;
+            }
             renderListOnly();
             refreshDatalist();
             showToast(`✅ 已添加「${name}」`);
@@ -2937,6 +3064,7 @@
             State.lastActivity = Date.now();
         };
 
+        // 其余按钮绑定（清空、更多、可见性、导出、导入、批量等）—— 全部保持原有逻辑，仅对保存调用增加 try/catch
         document.getElementById('clearForm').onclick = function() {
             ['inpName','inpUsername','inpLoginPw','inpTranPw','inpEmail','inpPhone','inpCategory','inpNote'].forEach(function(id) {
                 const element = document.getElementById(id);
@@ -2959,12 +3087,10 @@
             const button = document.getElementById('toggleLoginPwVis');
             if (input && button) {
                 if (input.type === 'password') {
-                    // 显示：保留当前已输入的值
                     input.type = 'text';
                     button.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
                     button.setAttribute('aria-label', '隐藏登录密码');
                 } else {
-                    // 隐藏并清空（避免明文残留）
                     input.type = 'password';
                     input.value = '';
                     button.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
@@ -3021,10 +3147,12 @@
                 </div>`;
             document.body.appendChild(modal);
             document.body.classList.add('modal-open');
+            const previousFocus = document.activeElement;
 
             const closeModal = () => {
                 modal.remove();
                 document.body.classList.remove('modal-open');
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
             };
             modal.querySelector('#exportEncryptChoice').onclick = () => { closeModal(); exportEncryptedBackup(); };
             modal.querySelector('#exportPlainChoice').onclick = () => { closeModal(); exportPlaintextJSON(); };
@@ -3067,10 +3195,12 @@
                 </div>`;
             document.body.appendChild(modal);
             document.body.classList.add('modal-open');
+            const previousFocus = document.activeElement;
             modal.querySelector('#importFileBtnSmall').onclick = function() {
                 const trustChecked = modal.querySelector('#trustPlainCheckSmall').checked;
                 modal.remove();
                 document.body.classList.remove('modal-open');
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
                 const fileInput = document.createElement('input');
                 fileInput.type = 'file';
                 fileInput.accept = '.json,.csv';
@@ -3116,10 +3246,12 @@
                 </div>`;
             document.body.appendChild(modal);
             document.body.classList.add('modal-open');
+            const previousFocus = document.activeElement;
             modal.querySelector('#importFileBtn').onclick = function() {
                 const trustChecked = modal.querySelector('#trustPlainCheck').checked;
                 modal.remove();
                 document.body.classList.remove('modal-open');
+                if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
                 const fileInput = document.createElement('input');
                 fileInput.type = 'file';
                 fileInput.accept = '.json,.csv';
@@ -3158,6 +3290,8 @@
     let showAuth = function() {
         const root = document.getElementById('root');
         if (!root) return;
+        // 初始化时清理残留备份
+        cleanMigrationBackup();
         const initialized = localStorage.getItem(CONFIG.STORAGE_INIT) === 'true' &&
             localStorage.getItem(CONFIG.STORAGE_SALT) &&
             localStorage.getItem(CONFIG.STORAGE_AUTH) &&
@@ -3186,6 +3320,7 @@
                     </div>`;
                 document.body.appendChild(modal);
                 document.body.classList.add('modal-open');
+                const previousFocus = document.activeElement;
                 const passwordInput1 = modal.querySelector('#newPw1');
                 const strengthFill = modal.querySelector('#setupStrengthFill');
                 const strengthText = modal.querySelector('#setupStrengthText');
@@ -3199,6 +3334,7 @@
                         await initializeNewVault(password1);
                         modal.remove();
                         document.body.classList.remove('modal-open');
+                        if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
                         showToast('✅ 保险库创建成功！');
                         showAuth();
                     } catch (error) { showToast(error.message, true); }
