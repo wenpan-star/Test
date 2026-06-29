@@ -1,9 +1,9 @@
-<!--
+﻿<!--
 ====================================================================================
- 静谧·密钥 v4.4.0 — 健壮性增强与同步冲突处理版
+ 静谧·密钥 v5.0.0 — 健壮性增强与同步冲突处理版
  更新日期：2026-06-29
 ====================================================================================
- 更新内容（v4.3.0 → v4.4.0）：
+ 更新内容（v4.3.0 → v5.0.0）：
  1. 【安全】所有 `saveEncrypted` 调用点增加 try/catch，保存失败时回滚操作并提示，杜绝“成功提示但数据未写入”。
  2. 【体验】编辑条目时若收到跨标签页同步，自动提示并关闭编辑框，防止编辑内容被覆盖。
  3. 【优化】解锁成功后自动清理 `serene_migration_backup`，避免敏感备份残留；应用初始化时若检测到残留备份也尝试清理。
@@ -11,7 +11,7 @@
  5. 【保持】所有原有功能、变量名、UI 逻辑完全不变，未做任何删减或简写。
 ====================================================================================
 -->
-<!-- 后续为 v4.4.0 完整代码，因长度限制分两次输出 -->
+<!-- 后续为 v5.0.0 完整代码，因长度限制分两次输出 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -23,7 +23,7 @@
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
-    <title>🔐 静谧·密钥 | 安全密码本 v4.4.0</title>
+    <title>🔐 静谧·密钥 | 安全密码本 v5.0.0</title>
     <style>
         /* ===================== 完整 CSS（卡片式布局 + 全量优化） ===================== */
         :root {
@@ -1033,7 +1033,7 @@
 (function() {
     // ===================== 常量与配置 =====================
     const CONFIG = {
-        APP_VERSION: '4.4.0',
+        APP_VERSION: '5.0.0',
         STORAGE_VAULT: 'serene_vault_enc_v3',
         STORAGE_SALT: 'serene_vault_salt_v3',
         STORAGE_AUTH: 'serene_vault_auth_v3',
@@ -1895,6 +1895,9 @@
                         State.passwords = oldPasswords;
                         State.customCategories = oldCategories;
                         State.rebuildIndex();
+                        renderCategoryList(container);   // 恢复分类管理界面
+                        renderListOnly();                // 恢复密码列表中的分类信息
+                        refreshDatalist();
                         showToast('保存失败：' + error.message, true, 5000);
                         return;
                     }
@@ -2205,6 +2208,10 @@
             if (newLoginPassword.length < CONFIG.LOGIN_PW_MIN || newLoginPassword.length > CONFIG.LOGIN_PW_MAX) return showToast(`登录密码需${CONFIG.LOGIN_PW_MIN}-${CONFIG.LOGIN_PW_MAX}位`, true);
             if (newTransactionPassword && !/^\d{6}$/.test(newTransactionPassword)) return showToast('交易密码必须为6位数字', true);
 
+            // 提前备份整个数组和分类（在任何可能删除条目的操作之前）
+            const oldPasswords = [...State.passwords];
+            const oldCategories = [...State.customCategories];
+
             const existingItem = State.passwords.find(function(p) { return p.name === newName && p.id !== item.id; });
             if (existingItem) {
                 const resolution = await promptDuplicateNameResolution(newName, false);
@@ -2213,10 +2220,6 @@
                     State.passwords = State.passwords.filter(function(p) { return p.id !== existingItem.id; });
                 }
             }
-
-            // 保存前备份整个数组和分类（因为分类可能被修改）
-            const oldPasswords = [...State.passwords];
-            const oldCategories = [...State.customCategories];
             // 应用修改
             item.name = newName;
             item.username = modal.querySelector('#editUsername').value.trim();
@@ -2533,6 +2536,9 @@
             const oldPasswords = [...State.passwords];
             State.passwords = [];
             State.rebuildIndex();
+            // 清空可见密码标记
+            State.visibleLoginPasswords.clear();
+            State.visibleTransactionPasswords.clear();
             try {
                 await saveEncrypted();
             } catch (error) {
@@ -2717,6 +2723,8 @@
                     showToast(`✅ 已添加"${name}"`);
                 } catch (error) {
                     State.customCategories = oldCategories;
+                    renderCategoryList(container);    // 刷新分类列表，恢复界面
+                    refreshDatalist();                // 更新下拉选择器
                     showToast('保存失败：' + error.message, true, 5000);
                 }
             } else {
@@ -3013,16 +3021,21 @@
             if (transactionPassword && !/^\d{6}$/.test(transactionPassword)) return showToast('交易密码必须为6位数字', true);
             if (State.passwords.length >= CONFIG.MAX_PASSWORDS) return showToast(`已达上限${CONFIG.MAX_PASSWORDS}`, true);
 
+            // 在所有可能删除条目的操作之前备份，以便任何失败均可完全回滚
+            const oldPasswords = [...State.passwords];
+
             const existingItem = State.passwords.find(function(p) { return p.name === name; });
             if (existingItem) {
                 const resolution = await promptDuplicateNameResolution(name, true);
-                if (resolution === 'cancel') return;
+                if (resolution === 'cancel') {
+                    return;  // 取消操作，无需回滚
+                }
                 if (resolution === 'overwrite') {
                     State.passwords = State.passwords.filter(function(p) { return p.id !== existingItem.id; });
                 }
+                // 注意：如果选择保留两者，oldPasswords 仍包含原始数据，后续添加仍可安全回滚
             }
 
-            const oldPasswords = [...State.passwords];
             State.passwords.unshift(normalizeItem({
                 name: name,
                 username: document.getElementById('inpUsername').value.trim(),
