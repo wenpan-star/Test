@@ -2510,19 +2510,8 @@
                 </div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     <div class="export-import-group" style="display:flex;gap:8px;flex-wrap:wrap;">
-                        <button class="btn btn-outline btn-sm" id="exportEncryptBtn"><svg class="icon"><use href="#icon-download"/></svg> 加密备份</button>
-                        <button class="btn btn-outline btn-sm" id="exportPlainBtn"><svg class="icon"><use href="#icon-download"/></svg> 明文JSON</button>
-                        <button class="btn btn-outline btn-sm" id="exportCsvBtn"><svg class="icon"><use href="#icon-download"/></svg> CSV</button>
+                        <button class="btn btn-outline btn-sm" id="exportBtn"><svg class="icon"><use href="#icon-download"/></svg> 导出</button>
                         <button class="btn btn-outline btn-sm" id="importBtn"><svg class="icon"><use href="#icon-upload"/></svg> 导入</button>
-                    </div>
-                    <div class="export-more-wrapper" style="position:relative;display:none;">
-                        <button class="btn btn-outline btn-sm" id="exportMoreBtn"><svg class="icon"><use href="#icon-download"/></svg> 更多 <svg class="icon" style="width:1em;height:1em;"><use href="#icon-chevron-down"/></svg></button>
-                        <div class="export-dropdown" id="exportDropdown">
-                            <button class="btn btn-outline btn-sm export-dropdown-item" id="exportEncryptBtnDrop"><svg class="icon"><use href="#icon-download"/></svg> 加密备份</button>
-                            <button class="btn btn-outline btn-sm export-dropdown-item" id="exportPlainBtnDrop"><svg class="icon"><use href="#icon-download"/></svg> 明文JSON</button>
-                            <button class="btn btn-outline btn-sm export-dropdown-item" id="exportCsvBtnDrop"><svg class="icon"><use href="#icon-download"/></svg> CSV</button>
-                            <button class="btn btn-outline btn-sm export-dropdown-item" id="importBtnDrop"><svg class="icon"><use href="#icon-upload"/></svg> 导入</button>
-                        </div>
                     </div>
                     <button class="btn btn-outline btn-sm" id="batchBtn"><svg class="icon"><use href="#icon-check-square"/></svg> 批量</button>
                     <button class="btn btn-outline btn-sm" id="wipeBtn" style="color:var(--danger);border-color:var(--danger);"><svg class="icon"><use href="#icon-alert-triangle"/></svg> 清空</button>
@@ -2731,66 +2720,52 @@
             togglePasswordVisibility('inpTranPw', 'toggleTranPwVis');
         };
 
-        // 导出
-        document.getElementById('exportEncryptBtn').onclick = exportEncryptedBackup;
-        document.getElementById('exportPlainBtn').onclick = exportPlaintextJSON;
-        document.getElementById('exportCsvBtn').onclick = exportCSV;
+        // 统一导出按钮
+        document.getElementById('exportBtn').onclick = function() {
+            const modal = document.createElement('div');
+            modal.className = 'modal';
+            modal.innerHTML = `
+                <div class="modal-card" style="max-width:380px;text-align:center;">
+                    <h3 style="margin-bottom:20px;">
+                        <svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-download"/></svg> 选择导出格式
+                    </h3>
+                    <button class="btn btn-primary" id="exportEncryptChoice" style="width:100%;margin-bottom:10px;">
+                        🔒 加密备份 (.json)
+                    </button>
+                    <button class="btn btn-outline" id="exportPlainChoice" style="width:100%;margin-bottom:10px;">
+                        📄 明文JSON (.json)
+                    </button>
+                    <button class="btn btn-outline" id="exportCsvChoice" style="width:100%;margin-bottom:10px;">
+                        📊 CSV 表格 (.csv)
+                    </button>
+                    <button class="btn btn-outline btn-sm" id="cancelExport" style="margin-top:6px;">取消</button>
+                </div>`;
+            document.body.appendChild(modal);
+            document.body.classList.add('modal-open');
 
-        // 窄屏导出/导入下拉按钮绑定（增加空值安全检查）
-        const exportMoreBtn = document.getElementById('exportMoreBtn');
-        const exportDropdown = document.getElementById('exportDropdown');
-        if (exportMoreBtn && exportDropdown) {
-            exportMoreBtn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                exportDropdown.classList.toggle('show');
-            });
-            const encryptBtnDrop = document.getElementById('exportEncryptBtnDrop');
-            const plainBtnDrop = document.getElementById('exportPlainBtnDrop');
-            const csvBtnDrop = document.getElementById('exportCsvBtnDrop');
-            const importBtnDrop = document.getElementById('importBtnDrop');
-            if (encryptBtnDrop) encryptBtnDrop.onclick = exportEncryptedBackup;
-            if (plainBtnDrop) plainBtnDrop.onclick = exportPlaintextJSON;
-            if (csvBtnDrop) csvBtnDrop.onclick = exportCSV;
-            if (importBtnDrop) importBtnDrop.onclick = function() {
-                // 复用 importBtn 的完整逻辑
-                const modal = document.createElement('div');
-                modal.className = 'modal';
-                modal.innerHTML = `
-                    <div class="modal-card">
-                        <h3><svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-upload"/></svg> 导入选项</h3>
-                        <div class="warning-box">⚠️ 导入明文JSON/CSV会暴露所有密码，请务必确认来源绝对可信。</div>
-                        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 0;font-size:0.9rem;">
-                            <input type="checkbox" id="trustPlainCheckDrop" class="checkbox-sm"> 我信任此来源，允许导入明文文件
-                        </label>
-                        <button id="importFileBtnDrop" class="btn btn-primary" style="width:100%;margin-top:12px;">选择文件</button>
-                    </div>`;
-                document.body.appendChild(modal);
-                document.body.classList.add('modal-open');
-                modal.querySelector('#importFileBtnDrop').onclick = function() {
-                    const trustChecked = modal.querySelector('#trustPlainCheckDrop').checked;
-                    modal.remove();
-                    document.body.classList.remove('modal-open');
-                    const fileInput = document.createElement('input');
-                    fileInput.type = 'file';
-                    fileInput.accept = '.json,.csv';
-                    fileInput.onchange = async function(event) {
-                        const file = event.target.files[0];
-                        if (!file) return;
-                        if (file.name.endsWith('.csv')) await importCSV(file, trustChecked);
-                        else await importFromFile(file, trustChecked);
-                        fileInput.remove();
-                    };
-                    fileInput.click();
-                };
-                exportDropdown.classList.remove('show');
+            const closeModal = () => {
+                modal.remove();
+                document.body.classList.remove('modal-open');
             };
-            // 点击外部关闭导出下拉菜单
-            document.addEventListener('click', function(event) {
-                if (exportMoreBtn && exportDropdown && !exportMoreBtn.contains(event.target) && !exportDropdown.contains(event.target)) {
-                    exportDropdown.classList.remove('show');
-                }
+
+            modal.querySelector('#exportEncryptChoice').onclick = () => {
+                closeModal();
+                exportEncryptedBackup();
+            };
+            modal.querySelector('#exportPlainChoice').onclick = () => {
+                closeModal();
+                exportPlaintextJSON();
+            };
+            modal.querySelector('#exportCsvChoice').onclick = () => {
+                closeModal();
+                exportCSV();
+            };
+            modal.querySelector('#cancelExport').onclick = closeModal;
+
+            modal.addEventListener('click', function(e) {
+                if (e.target === modal) closeModal();
             });
-        }
+        };
 
         // 批量
         document.getElementById('batchBtn').onclick = toggleBatchMode;
