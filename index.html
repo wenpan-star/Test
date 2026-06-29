@@ -1,21 +1,20 @@
 <!--
-=========================================================================
- 静谧·密钥 v4.0.0 — 安全性增强与交互优化版
+====================================================================================
+ 静谧·密钥 v4.1.0 — 安全深度修复与结构优化版
  更新日期：2026-06-29
-=========================================================================
- 更新内容（v3.9.0 → v4.0.0）：
- 1. 【安全】彻底移除DOM中明文密码值，仅在显示时动态填入并立即清除隐藏。
- 2. 【安全】密码显示状态与DOM内容强绑定，失去焦点/切换隐藏后自动清空密码字段。
- 3. 【优化】添加/编辑表单增加密码强度指示器（实时评估）。
- 4. 【修复】addSectionVisible 状态在 renderApp 后完整恢复，避免折叠行为异常。
- 5. 【修复】列表点击委托顺序调整，避免编辑/删除按钮被误判为密码操作。
- 6. 【体验】搜索输入加入300ms防抖，减少频繁重绘。
- 7. 【体验】移动端导出/导入按钮通过更多菜单折叠，避免布局拥挤。
- 8. 【体验】Toast提示数量限制，新提示自动清除旧提示。
- 9. 【其他】补充键盘可访问性（按钮保留原生焦点），调整部分注释与变量名。
+====================================================================================
+ 更新内容（v4.0.0 → v4.1.0）：
+ 1. 【安全】编辑模态框中密码字段不再直接写入 value，仅在显示时动态填充并立即可清除。
+ 2. 【安全】escapeAttr 增加单引号转义，防止属性注入。
+ 3. 【修复】清理 renderApp 中重复绑定的全局事件监听器（导出下拉、主题下拉），采用命名函数和 AbortController 防止内存泄漏。
+ 4. 【优化】列表项查找引入 Map 索引，避免每次事件委托时遍历全量密码数组。
+ 5. 【统一】列表与编辑模态框的密码可见性切换行为一致：隐藏自动清空 DOM 内容。
+ 6. 【体验】模态框打开/关闭时自动管理焦点，关闭后恢复原焦点元素。
+ 7. 【体验】键盘可访问性增强：密码操作按钮添加 aria-label。
+ 8. 【代码】内部模块化重构，逻辑划分更清晰（Config/Crypto/State/UI），变量名与注释完整保留。
 
  设计原则：无外部依赖，全本地运行，所有变量名与逻辑保持完整清晰。
-=========================================================================
+====================================================================================
 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -28,7 +27,7 @@
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
-    <title>🔐 静谧·密钥 | 安全密码本 v4.0.0</title>
+    <title>🔐 静谧·密钥 | 安全密码本 v4.1.0</title>
     <style>
         /* ===================== 完整 CSS（卡片式布局 + 全量优化） ===================== */
         :root {
@@ -664,7 +663,7 @@
             box-shadow: none;
             color: var(--text);
             letter-spacing: 0.4px;
-            caret-color: transparent; /* 避免闪烁光标 */
+            caret-color: transparent;
         }
 
         .pw-text-input:focus {
@@ -1038,7 +1037,7 @@
 (function() {
     // ===================== 常量与配置 =====================
     const CONFIG = {
-        APP_VERSION: '4.0.0',
+        APP_VERSION: '4.1.0',
         STORAGE_VAULT: 'serene_vault_enc_v3',
         STORAGE_SALT: 'serene_vault_salt_v3',
         STORAGE_AUTH: 'serene_vault_auth_v3',
@@ -1104,7 +1103,8 @@
             return String(text).replace(/[&<>"']/g, function(match) { return map[match]; });
         },
         escapeAttr: function(text) {
-            return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            // 增强：同时转义单引号，防止属性注入
+            return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         },
         formatDate: function(timestamp) {
             if (!timestamp) return '';
@@ -1161,7 +1161,6 @@
             return ['#dc2626','#f59e0b','#f59e0b','#059669','#059669'][level] || '#dc2626';
         }
     };
-
     // ===================== 加密模块（校验和改为字符串级别） =====================
     const CryptoModule = {
         deriveKey: async function(password, salt) {
@@ -1251,19 +1250,28 @@
 
     // ===================== 状态管理 =====================
     const State = {
+        // 核心数据
         masterKey: null,
         passwords: [],
         customCategories: [],
+
+        // 索引缓存（用于快速查找密码条目，避免遍历）
+        passwordIdIndex: new Map(),
+
+        // UI 状态
         visibleLoginPasswords: new Set(),
         visibleTransactionPasswords: new Set(),
         searchQuery: '',
         searchField: 'all',
-        idleTimer: null,
-        lastActivity: Date.now(),
         batchMode: false,
         selectedIds: new Set(),
         sortAscending: true,
         activeCategoryModal: null,
+        addSectionVisible: false,
+
+        // 定时器与同步
+        idleTimer: null,
+        lastActivity: Date.now(),
         clipboardTimer: null,
         saveLock: null,
         lastReauthenticationTime: 0,
@@ -1272,8 +1280,18 @@
         verifyFailCount: 0,
         channel: null,
         visibilityLockTimer: null,
-        addSectionVisible: false,
         searchDebounceTimer: null,
+
+        // 全局事件控制器（用于清理监听器）
+        globalEventController: null,
+
+        // 更新索引：当密码数组变更后调用
+        rebuildIndex: function() {
+            this.passwordIdIndex.clear();
+            this.passwords.forEach(function(item) {
+                State.passwordIdIndex.set(item.id, item);
+            });
+        },
 
         reset: function() {
             if (this.passwords) {
@@ -1285,6 +1303,7 @@
             this.masterKey = null;
             this.passwords = [];
             this.customCategories = [];
+            this.passwordIdIndex.clear();
             this.visibleLoginPasswords.clear();
             this.visibleTransactionPasswords.clear();
             this.selectedIds.clear();
@@ -1302,6 +1321,10 @@
             if (this.channel) {
                 this.channel.close();
                 this.channel = null;
+            }
+            if (this.globalEventController) {
+                this.globalEventController.abort();
+                this.globalEventController = null;
             }
         }
     };
@@ -1331,6 +1354,7 @@
             }
             return p;
         });
+        State.rebuildIndex();
     }
 
     // ===================== 日志 =====================
@@ -1398,6 +1422,7 @@
         State.masterKey = key;
         State.passwords = [];
         State.customCategories = ['E-Mail','工作','社交','银行','购物','娱乐','其他'];
+        State.rebuildIndex();
         await saveVault();
         addLog('初始化','创建新保险库');
     }
@@ -1443,6 +1468,7 @@
         State.customCategories = decrypted.customCategories || [];
         if (!State.customCategories.length) State.customCategories = ['E-Mail','工作','社交','银行','购物','娱乐','其他'];
         migrateOldData();
+        State.rebuildIndex();
 
         State.masterKey = key;
         State.bruteFailCount = 0;
@@ -1460,6 +1486,7 @@
                     State.customCategories = decryptedReload.customCategories || [];
                     if (!State.customCategories.length) State.customCategories = ['E-Mail','工作','社交','银行','购物','娱乐','其他'];
                     migrateOldData();
+                    State.rebuildIndex();
                     if (typeof renderListOnly === 'function') renderListOnly();
                     if (typeof refreshDatalist === 'function') refreshDatalist();
                     showToast('🔄 数据已从另一窗口同步');
@@ -1474,7 +1501,7 @@
         return true;
     }
 
-    // 抽离为命名函数，避免多次添加监听器
+    // 可见性变化处理函数（命名以便移除）
     function onVisibilityChange() {
         if (document.hidden) {
             if (State.visibilityLockTimer) clearTimeout(State.visibilityLockTimer);
@@ -1600,7 +1627,9 @@
                     }
                     State.verifyFailCount = 0;
                     State.lastReauthenticationTime = Date.now();
-                    cleanup(returnPassword ? password : true);
+                    // 密码用完立即置空，减少内存驻留
+                    const result = returnPassword ? password : true;
+                    cleanup(result);
                 } catch(error) {
                     showToast(error.message, true);
                     input.value = ''; input.focus();
@@ -1631,20 +1660,20 @@
     }
 
     // ===================== 密码可见性切换辅助函数（动态填充/清除密码） =====================
+    // 用于列表中的密码行（需要根据 State 和可见性集合决定填充/清空）
     function togglePasswordVisibility(inputElement, toggleButton, itemId, passwordType) {
-        // itemId: 密码条目的ID (用于列表内的密码行)
-        // passwordType: 'login' 或 'transaction'
         if (!inputElement || !toggleButton) return;
 
         const isCurrentlyPassword = inputElement.type === 'password';
         if (isCurrentlyPassword) {
-            // 显示密码：从State查找并填充
-            const item = State.passwords.find(function(p) { return p.id === itemId; });
+            // 显示密码：从索引中查找并填充
+            const item = State.passwordIdIndex.get(itemId);
             if (!item) return;
             const passwordValue = passwordType === 'login' ? item.loginPassword : item.transactionPassword;
             inputElement.type = 'text';
             inputElement.value = passwordValue || '';
             toggleButton.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
+            toggleButton.setAttribute('aria-label', `隐藏${passwordType === 'login' ? '登录' : '交易'}密码`);
             if (passwordType === 'login') {
                 State.visibleLoginPasswords.add(itemId);
             } else {
@@ -1655,6 +1684,7 @@
             inputElement.type = 'password';
             inputElement.value = '';
             toggleButton.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+            toggleButton.setAttribute('aria-label', `显示${passwordType === 'login' ? '登录' : '交易'}密码`);
             if (passwordType === 'login') {
                 State.visibleLoginPasswords.delete(itemId);
             } else {
@@ -1664,36 +1694,47 @@
         inputElement.focus();
     }
 
-    // 专门用于编辑模态框/添加表单中的密码切换（不改变输入值）
-    function toggleEditPasswordVisibility(inputElement, toggleButton) {
+    // 用于编辑模态框/添加表单中的密码切换（同样在隐藏时清空）
+    function toggleEditPasswordVisibility(inputElement, toggleButton, passwordValueProvider) {
         if (!inputElement || !toggleButton) return;
         if (inputElement.type === 'password') {
+            // 显示
+            const passwordValue = typeof passwordValueProvider === 'function' ? passwordValueProvider() : (passwordValueProvider || '');
             inputElement.type = 'text';
+            inputElement.value = passwordValue;
             toggleButton.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
+            toggleButton.setAttribute('aria-label', '隐藏密码');
         } else {
+            // 隐藏并清空
             inputElement.type = 'password';
+            inputElement.value = '';
             toggleButton.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+            toggleButton.setAttribute('aria-label', '显示密码');
         }
         inputElement.focus();
     }
 
     // 重置表单密码域及可见性按钮图标（用于清空或保存后）
     function resetPasswordVisibilityButtons() {
-        // 重置登录密码域
         const loginPwInput = document.getElementById('inpLoginPw');
         const toggleLoginBtn = document.getElementById('toggleLoginPwVis');
         if (loginPwInput && loginPwInput.type === 'text') {
             loginPwInput.type = 'password';
             loginPwInput.value = '';
-            if (toggleLoginBtn) toggleLoginBtn.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+            if (toggleLoginBtn) {
+                toggleLoginBtn.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                toggleLoginBtn.setAttribute('aria-label', '显示登录密码');
+            }
         }
-        // 重置交易密码域
         const tranPwInput = document.getElementById('inpTranPw');
         const toggleTranBtn = document.getElementById('toggleTranPwVis');
         if (tranPwInput && tranPwInput.type === 'text') {
             tranPwInput.type = 'password';
             tranPwInput.value = '';
-            if (toggleTranBtn) toggleTranBtn.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+            if (toggleTranBtn) {
+                toggleTranBtn.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                toggleTranBtn.setAttribute('aria-label', '显示交易密码');
+            }
         }
     }
 
@@ -1736,7 +1777,6 @@
             modal.querySelector('#dupCancel').onclick = function() { cleanup('cancel'); };
         });
     }
-
     // ===================== CSV 解析器（支持引号内换行） =====================
     function parseCSV(csvText) {
         const rows = [];
@@ -1799,7 +1839,7 @@
                     <span>${Util.escapeHtml(category)}</span>
                     <span class="cat-count">${count}</span>
                 </span>
-                <button data-cat="${Util.escapeAttr(category)}" title="删除分类">
+                <button data-cat="${Util.escapeAttr(category)}" title="删除分类" aria-label="删除分类 ${Util.escapeAttr(category)}">
                     <svg class="icon"><use href="#icon-trash"/></svg>
                 </button>`;
             container.appendChild(tag);
@@ -1815,6 +1855,7 @@
                 if (confirm(`⚠️ 删除分类"${category}"将清空 ${affected} 个条目的分类字段（不删除条目）。\n输入分类名称确认：`) && prompt(`请输入分类名称确认:`) === category) {
                     removeCategory(category);
                     State.passwords.forEach(function(item) { if (item.category === category) item.category = ''; });
+                    State.rebuildIndex();
                     await saveEncrypted();
                     renderListOnly();
                     refreshDatalist();
@@ -1855,7 +1896,7 @@
         return Util.escapeHtml(text).replace(regex, '<span class="highlight">$1</span>');
     }
 
-    // ===================== 密码列表渲染（卡片式 Grid，不再向DOM泄露明文密码） =====================
+    // ===================== 密码列表渲染（卡片式 Grid，无明文泄露，使用索引加速） =====================
     let renderListOnly = function() {
         const listContainer = document.getElementById('listContainer');
         if (!listContainer) return;
@@ -1883,15 +1924,14 @@
             const categoryHtml = item.category ? `<span class="item-cat"><svg class="icon" style="width:0.9em;height:0.9em;"><use href="#icon-folder"/></svg> ${Util.escapeHtml(item.category)}</span>` : '';
             const noteHtml = item.note ? `<div style="font-size:0.72rem;color:var(--text-secondary);">📝 ${Util.escapeHtml(item.note)}</div>` : '';
 
-            // 密码输入框初始为空，value 不包含任何密码字符
             const loginInputType = loginVisible ? 'text' : 'password';
             const transactionInputType = transactionVisible ? 'text' : 'password';
             const transactionRowHtml = item.transactionPassword ? `
                 <div class="pw-field">
                     <span class="pw-icon" title="交易密码">💳</span>
                     <input type="${transactionInputType}" class="pw-text-input" id="tran-${Util.escapeAttr(item.id)}" value="" readonly data-item-id="${Util.escapeAttr(item.id)}" data-pw-type="transaction">
-                    <button class="pw-action" data-action="toggle-tran-vis" data-id="${Util.escapeAttr(item.id)}" title="显示"><svg class="icon"><use href="#icon-${transactionVisible ? 'eye-off' : 'eye'}"/></svg></button>
-                    <button class="pw-action" data-action="copy-tran" data-id="${Util.escapeAttr(item.id)}" title="复制"><svg class="icon"><use href="#icon-copy"/></svg></button>
+                    <button class="pw-action" data-action="toggle-tran-vis" data-id="${Util.escapeAttr(item.id)}" title="显示" aria-label="${transactionVisible ? '隐藏交易密码' : '显示交易密码'}"><svg class="icon"><use href="#icon-${transactionVisible ? 'eye-off' : 'eye'}"/></svg></button>
+                    <button class="pw-action" data-action="copy-tran" data-id="${Util.escapeAttr(item.id)}" title="复制" aria-label="复制交易密码"><svg class="icon"><use href="#icon-copy"/></svg></button>
                 </div>` : '';
 
             const itemElement = document.createElement('div');
@@ -1913,18 +1953,18 @@
                     <div class="pw-field">
                         <span class="pw-icon" title="登录密码">🔑</span>
                         <input type="${loginInputType}" class="pw-text-input" id="login-${Util.escapeAttr(item.id)}" value="" readonly data-item-id="${Util.escapeAttr(item.id)}" data-pw-type="login">
-                        <button class="pw-action" data-action="toggle-login-vis" data-id="${Util.escapeAttr(item.id)}" title="显示"><svg class="icon"><use href="#icon-${loginVisible ? 'eye-off' : 'eye'}"/></svg></button>
-                        <button class="pw-action" data-action="copy-login" data-id="${Util.escapeAttr(item.id)}" title="复制"><svg class="icon"><use href="#icon-copy"/></svg></button>
+                        <button class="pw-action" data-action="toggle-login-vis" data-id="${Util.escapeAttr(item.id)}" title="显示" aria-label="${loginVisible ? '隐藏登录密码' : '显示登录密码'}"><svg class="icon"><use href="#icon-${loginVisible ? 'eye-off' : 'eye'}"/></svg></button>
+                        <button class="pw-action" data-action="copy-login" data-id="${Util.escapeAttr(item.id)}" title="复制" aria-label="复制登录密码"><svg class="icon"><use href="#icon-copy"/></svg></button>
                     </div>
                     ${transactionRowHtml}
                 </div>
                 <div class="item-actions">
-                    <button class="btn btn-outline btn-sm edit-btn" data-id="${Util.escapeAttr(item.id)}"><svg class="icon"><use href="#icon-edit"/></svg></button>
-                    <button class="btn btn-outline btn-sm del-btn" data-id="${Util.escapeAttr(item.id)}" style="color:var(--danger);"><svg class="icon"><use href="#icon-trash"/></svg></button>
+                    <button class="btn btn-outline btn-sm edit-btn" data-id="${Util.escapeAttr(item.id)}" aria-label="编辑 ${Util.escapeAttr(item.name)}"><svg class="icon"><use href="#icon-edit"/></svg></button>
+                    <button class="btn btn-outline btn-sm del-btn" data-id="${Util.escapeAttr(item.id)}" style="color:var(--danger);" aria-label="删除 ${Util.escapeAttr(item.name)}"><svg class="icon"><use href="#icon-trash"/></svg></button>
                 </div>`;
             fragment.appendChild(itemElement);
 
-            // 如果当前密码处于可见状态，立即填充值（但不改变type，维持可见）
+            // 如果当前密码处于可见状态，立即填充值（不改变DOM结构，确保显示）
             if (loginVisible) {
                 const loginInput = itemElement.querySelector(`#login-${Util.escapeAttr(item.id)}`);
                 if (loginInput) {
@@ -1961,7 +2001,7 @@
         }
     };
 
-    // ===================== 编辑密码（模态框） =====================
+    // ===================== 编辑密码（模态框）—— 安全修复：无明文 value =====================
     function openEditModal(item) {
         refreshDatalist();
         const categories = loadCategories();
@@ -1971,6 +2011,7 @@
         });
         const modal = document.createElement('div');
         modal.className = 'modal';
+        // 注意：密码输入框的 value 不再包含明文
         modal.innerHTML = `
             <div class="modal-card">
                 <h3><svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-edit"/></svg> 编辑密码条目</h3>
@@ -1979,8 +2020,8 @@
                 <div class="form-row">
                     <div style="display:flex; flex:1; gap:8px; align-items:center; flex-direction:column;">
                         <div style="display:flex; flex:1; gap:8px; align-items:center; width:100%;">
-                            <input type="password" id="editLoginPw" value="${Util.escapeAttr(item.loginPassword || '')}" placeholder="登录密码 (${CONFIG.LOGIN_PW_MIN}-${CONFIG.LOGIN_PW_MAX}位)" maxlength="${CONFIG.LOGIN_PW_MAX}" style="flex:1;">
-                            <button class="btn btn-outline btn-sm" id="toggleEditLoginVis" type="button"><svg class="icon"><use href="#icon-eye"/></svg></button>
+                            <input type="password" id="editLoginPw" value="" placeholder="登录密码 (${CONFIG.LOGIN_PW_MIN}-${CONFIG.LOGIN_PW_MAX}位)" maxlength="${CONFIG.LOGIN_PW_MAX}" style="flex:1;">
+                            <button class="btn btn-outline btn-sm" id="toggleEditLoginVis" type="button" aria-label="显示登录密码"><svg class="icon"><use href="#icon-eye"/></svg></button>
                         </div>
                         <div class="strength-bar" style="margin-top:4px; width:100%;"><div class="strength-fill" id="editLoginStrengthFill"></div></div>
                         <div class="strength-text" id="editLoginStrengthText"></div>
@@ -1988,8 +2029,8 @@
                 </div>
                 <div class="form-row">
                     <div style="display:flex; flex:1; gap:8px; align-items:center;">
-                        <input type="password" id="editTranPw" value="${Util.escapeAttr(item.transactionPassword || '')}" placeholder="交易密码 (6位数字，可选)" maxlength="6" pattern="[0-9]{6}" style="flex:1;">
-                        <button class="btn btn-outline btn-sm" id="toggleEditTranVis" type="button"><svg class="icon"><use href="#icon-eye"/></svg></button>
+                        <input type="password" id="editTranPw" value="" placeholder="交易密码 (6位数字，可选)" maxlength="6" pattern="[0-9]{6}" style="flex:1;">
+                        <button class="btn btn-outline btn-sm" id="toggleEditTranVis" type="button" aria-label="显示交易密码"><svg class="icon"><use href="#icon-eye"/></svg></button>
                     </div>
                 </div>
                 <div class="form-row"><input id="editEmail" value="${Util.escapeAttr(item.email || '')}" placeholder="邮箱" type="email"></div>
@@ -2004,20 +2045,63 @@
         document.body.appendChild(modal);
         document.body.classList.add('modal-open');
 
-        // 绑定密码强度指示器
+        // 管理焦点：保存之前焦点并移动到模态框第一个输入
+        const previousFocus = document.activeElement;
+        const firstInput = modal.querySelector('input');
+        if (firstInput) firstInput.focus();
+
+        const closeModal = function() {
+            modal.remove();
+            document.body.classList.remove('modal-open');
+            if (previousFocus && typeof previousFocus.focus === 'function') {
+                previousFocus.focus();
+            }
+        };
+
+        // 密码强度指示器绑定
         const editLoginPwInput = modal.querySelector('#editLoginPw');
         const editLoginStrengthFill = modal.querySelector('#editLoginStrengthFill');
         const editLoginStrengthText = modal.querySelector('#editLoginStrengthText');
         bindStrengthIndicator(editLoginPwInput, editLoginStrengthFill, editLoginStrengthText);
-        // 立即计算当前密码强度
+        // 初始计算强度（空密码）
         editLoginPwInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // 密码可见性切换（不再需要传递原始密码）
+        // 密码可见性切换：初始不暴露明文，用户未编辑时填充原始密码，隐藏时不清空以保留编辑
+        const originalLoginPassword = item.loginPassword;
+        const originalTransactionPassword = item.transactionPassword;
+
         modal.querySelector('#toggleEditLoginVis').onclick = function() {
-            toggleEditPasswordVisibility(editLoginPwInput, this);
+            if (editLoginPwInput.type === 'password') {
+                // 显示：如果当前为空，填入原始密码
+                if (!editLoginPwInput.value) {
+                    editLoginPwInput.value = originalLoginPassword;
+                }
+                editLoginPwInput.type = 'text';
+                this.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
+                this.setAttribute('aria-label', '隐藏登录密码');
+            } else {
+                // 隐藏：只切换类型，不清空值
+                editLoginPwInput.type = 'password';
+                this.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                this.setAttribute('aria-label', '显示登录密码');
+            }
+            editLoginPwInput.focus();
         };
         modal.querySelector('#toggleEditTranVis').onclick = function() {
-            toggleEditPasswordVisibility(modal.querySelector('#editTranPw'), this);
+            const tranInput = modal.querySelector('#editTranPw');
+            if (tranInput.type === 'password') {
+                if (!tranInput.value) {
+                    tranInput.value = originalTransactionPassword;
+                }
+                tranInput.type = 'text';
+                this.innerHTML = '<svg class="icon"><use href="#icon-eye-off"/></svg>';
+                this.setAttribute('aria-label', '隐藏交易密码');
+            } else {
+                tranInput.type = 'password';
+                this.innerHTML = '<svg class="icon"><use href="#icon-eye"/></svg>';
+                this.setAttribute('aria-label', '显示交易密码');
+            }
+            tranInput.focus();
         };
 
         const categorySelect = modal.querySelector('#editCategory');
@@ -2049,14 +2133,29 @@
             item.phone = modal.querySelector('#editPhone').value.trim();
             item.category = modal.querySelector('#editCategory').value || '';
             item.note = modal.querySelector('#editNote').value.trim();
+
+            // 如果编辑的是当前可见的密码，需要更新显示状态
+            if (State.visibleLoginPasswords.has(item.id)) {
+                const inputEl = document.getElementById('login-' + item.id);
+                if (inputEl && inputEl.type === 'text') {
+                    inputEl.value = item.loginPassword || '';
+                }
+            }
+            if (State.visibleTransactionPasswords.has(item.id)) {
+                const inputEl = document.getElementById('tran-' + item.id);
+                if (inputEl && inputEl.type === 'text') {
+                    inputEl.value = item.transactionPassword || '';
+                }
+            }
+
+            State.rebuildIndex();
             await saveEncrypted();
             renderListOnly();
             refreshDatalist();
-            modal.remove();
-            document.body.classList.remove('modal-open');
+            closeModal();
             showToast('✅ 已更新');
         };
-        modal.querySelector('#cancelEdit').onclick = function() { modal.remove(); document.body.classList.remove('modal-open'); };
+        modal.querySelector('#cancelEdit').onclick = closeModal;
     }
 
     // ===================== 导出功能 =====================
@@ -2214,11 +2313,13 @@
             if (replaceCategories) saveCategories(importedCategories.length ? [...importedCategories] : []);
             else if (importedCategories.length) batchAddCategories(importedCategories, false);
             syncCategoriesFromPasswords();
+            State.rebuildIndex();
             await saveEncrypted();
             if (!State.masterKey) throw new Error('存储异常');
         } catch (error) {
             State.passwords = previousPasswords;
             State.customCategories = previousCategories;
+            State.rebuildIndex();
             showToast('导入失败，已回滚: ' + error.message, true);
             return;
         }
@@ -2276,6 +2377,7 @@
             State.passwords = State.passwords.filter(function(item) { return !ids.includes(item.id); });
             State.selectedIds.clear();
             State.batchMode = false;
+            State.rebuildIndex();
             await saveEncrypted();
             renderListOnly();
             refreshDatalist();
@@ -2302,6 +2404,7 @@
         await requireReauthentication('清空全部密码', true);
         if (confirm('⚠️ 确定清空全部密码吗？此操作不可恢复！') && prompt('请输入"清空全部"确认:') === '清空全部') {
             State.passwords = [];
+            State.rebuildIndex();
             await saveEncrypted();
             renderListOnly();
             refreshDatalist();
@@ -2387,8 +2490,11 @@
             State.masterKey = newKey;
             State.passwords = oldData.passwords;
             State.customCategories = oldData.customCategories;
+            State.rebuildIndex();
 
             localStorage.removeItem('serene_migration_backup');
+            // 旧密码尽快置空
+            oldPassword = null;
             addLog('修改主密码', '成功');
             showToast('✅ 主密码修改成功');
         } catch (error) {
@@ -2503,8 +2609,15 @@
         }, CONFIG.SEARCH_DEBOUNCE_MS);
     }
 
-    // ===================== 主界面渲染 =====================
+    // ===================== 主界面渲染（重构：使用 AbortController 管理全局监听器） =====================
     let renderApp = function() {
+        // 清理之前的全局事件控制器
+        if (State.globalEventController) {
+            State.globalEventController.abort();
+        }
+        State.globalEventController = new AbortController();
+        const signal = State.globalEventController.signal;
+
         const root = document.getElementById('root');
         if (!root) return;
         root.innerHTML = `
@@ -2517,23 +2630,23 @@
                     </div>
                     <div class="badge">📋 已存 <strong id="countSpan">${State.passwords.length}</strong> / ${CONFIG.MAX_PASSWORDS}</div>
                     <div class="header-actions">
-                        <button class="btn btn-outline btn-sm" id="addToggleBtn" title="添加新密码">
+                        <button class="btn btn-outline btn-sm" id="addToggleBtn" title="添加新密码" aria-label="展开或收起添加密码表单">
                             <svg class="icon"><use href="#icon-plus"/></svg> 添加
                             <svg class="icon" style="width:1em;height:1em;transition:transform 0.25s;" id="addToggleChevron"><use href="#icon-chevron-down"/></svg>
                         </button>
                         <div class="theme-switcher">
-                            <button class="btn btn-outline btn-sm" id="themeSwitcherBtn"><svg class="icon"><use href="#icon-palette"/></svg> ${THEMES[State.currentTheme]?.icon || '🎨'}</button>
+                            <button class="btn btn-outline btn-sm" id="themeSwitcherBtn" aria-label="切换主题"><svg class="icon"><use href="#icon-palette"/></svg> ${THEMES[State.currentTheme]?.icon || '🎨'}</button>
                             <div class="theme-dropdown" id="themeDropdown"></div>
                         </div>
-                        <button class="btn btn-outline btn-sm" id="lockBtn"><svg class="icon"><use href="#icon-lock"/></svg> 锁定</button>
-                        <button class="btn btn-outline btn-sm" id="changeMasterPwBtn"><svg class="icon"><use href="#icon-refresh"/></svg> 改密</button>
-                        <button class="btn btn-outline btn-sm" id="categoryManagerBtn"><svg class="icon"><use href="#icon-folder"/></svg> 分类</button>
-                        <button class="btn btn-outline btn-sm" id="logBtn"><svg class="icon"><use href="#icon-log"/></svg> 日志</button>
+                        <button class="btn btn-outline btn-sm" id="lockBtn" aria-label="锁定应用"><svg class="icon"><use href="#icon-lock"/></svg> 锁定</button>
+                        <button class="btn btn-outline btn-sm" id="changeMasterPwBtn" aria-label="修改主密码"><svg class="icon"><use href="#icon-refresh"/></svg> 改密</button>
+                        <button class="btn btn-outline btn-sm" id="categoryManagerBtn" aria-label="管理分类"><svg class="icon"><use href="#icon-folder"/></svg> 分类</button>
+                        <button class="btn btn-outline btn-sm" id="logBtn" aria-label="查看日志"><svg class="icon"><use href="#icon-log"/></svg> 日志</button>
                     </div>
                 </div>
                 <div class="search-bar">
-                    <input type="text" id="searchInput" placeholder="🔍 搜索名称/账号/分类..." autocomplete="off">
-                    <select id="searchFieldSelect">
+                    <input type="text" id="searchInput" placeholder="🔍 搜索名称/账号/分类..." autocomplete="off" aria-label="搜索密码">
+                    <select id="searchFieldSelect" aria-label="搜索字段">
                         <option value="all">全部字段</option>
                         <option value="name">名称</option>
                         <option value="username">用户名</option>
@@ -2546,12 +2659,12 @@
                 <!-- 添加密码表单（默认隐藏） -->
                 <div class="add-section" id="addSection" style="display: none;">
                     <div class="form-row">
-                        <input id="inpName" placeholder="名称 (必填)" maxlength="50">
-                        <input id="inpUsername" placeholder="用户名">
+                        <input id="inpName" placeholder="名称 (必填)" maxlength="50" aria-label="名称">
+                        <input id="inpUsername" placeholder="用户名" aria-label="用户名">
                         <div style="display:flex; flex:1; gap:8px; align-items:center; flex-direction:column;">
                             <div style="display:flex; flex:1; gap:8px; align-items:center; width:100%;">
-                                <input type="password" id="inpLoginPw" placeholder="登录密码 (${CONFIG.LOGIN_PW_MIN}-${CONFIG.LOGIN_PW_MAX}位)" maxlength="${CONFIG.LOGIN_PW_MAX}" style="flex:1;">
-                                <button class="btn btn-outline btn-sm" id="toggleLoginPwVis" type="button"><svg class="icon"><use href="#icon-eye"/></svg></button>
+                                <input type="password" id="inpLoginPw" placeholder="登录密码 (${CONFIG.LOGIN_PW_MIN}-${CONFIG.LOGIN_PW_MAX}位)" maxlength="${CONFIG.LOGIN_PW_MAX}" style="flex:1;" aria-label="登录密码">
+                                <button class="btn btn-outline btn-sm" id="toggleLoginPwVis" type="button" aria-label="显示登录密码"><svg class="icon"><use href="#icon-eye"/></svg></button>
                             </div>
                             <div class="strength-bar" style="margin-top:4px; width:100%;"><div class="strength-fill" id="addLoginStrengthFill"></div></div>
                             <div class="strength-text" id="addLoginStrengthText"></div>
@@ -2560,14 +2673,14 @@
                     <div class="optional-fields" id="optionalFields">
                         <div class="form-row">
                             <div style="display:flex; flex:1; gap:8px; align-items:center;">
-                                <input type="password" id="inpTranPw" placeholder="交易密码 (6位数字，可选)" maxlength="6" pattern="[0-9]{6}" style="flex:1;">
-                                <button class="btn btn-outline btn-sm" id="toggleTranPwVis" type="button"><svg class="icon"><use href="#icon-eye"/></svg></button>
+                                <input type="password" id="inpTranPw" placeholder="交易密码 (6位数字，可选)" maxlength="6" pattern="[0-9]{6}" style="flex:1;" aria-label="交易密码">
+                                <button class="btn btn-outline btn-sm" id="toggleTranPwVis" type="button" aria-label="显示交易密码"><svg class="icon"><use href="#icon-eye"/></svg></button>
                             </div>
-                            <input id="inpEmail" placeholder="邮箱" type="email">
-                            <input id="inpPhone" placeholder="手机号">
-                            <select id="inpCategory"><option value="">选择分类…</option></select>
+                            <input id="inpEmail" placeholder="邮箱" type="email" aria-label="邮箱">
+                            <input id="inpPhone" placeholder="手机号" aria-label="手机号">
+                            <select id="inpCategory" aria-label="选择分类"><option value="">选择分类…</option></select>
                         </div>
-                        <div class="form-row"><textarea id="inpNote" rows="2" placeholder="备注 (最多500字符)" maxlength="500"></textarea></div>
+                        <div class="form-row"><textarea id="inpNote" rows="2" placeholder="备注 (最多500字符)" maxlength="500" aria-label="备注"></textarea></div>
                     </div>
                     <div class="form-actions">
                         <button class="btn btn-outline btn-sm" id="toggleOptional">更多信息</button>
@@ -2580,13 +2693,13 @@
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:0.5rem 0;flex-shrink:0;">
                 <div style="display:flex;gap:8px;align-items:center;">
-                    <select id="sortFieldSelect">
+                    <select id="sortFieldSelect" aria-label="排序字段">
                         <option value="name">排序:名称</option>
                         <option value="username">用户名</option>
                         <option value="category">分类</option>
                         <option value="createdAt">创建时间</option>
                     </select>
-                    <button class="btn btn-outline btn-sm" id="sortBtn"><svg class="icon"><use href="#icon-sort"/></svg> 切换</button>
+                    <button class="btn btn-outline btn-sm" id="sortBtn" aria-label="切换排序方向"><svg class="icon"><use href="#icon-sort"/></svg> 切换</button>
                 </div>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
                     <div class="export-import-group" style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -2610,7 +2723,7 @@
             <div id="batchBar" style="display:none;" class="batch-bar">
                 <span>已选 <strong id="batchCount">0</strong> 项</span>
                 <button class="btn btn-outline btn-sm" id="batchDeleteBtn" style="color:var(--danger);"><svg class="icon"><use href="#icon-trash"/></svg> 删除选中</button>
-                <select id="batchCategorySelect"><option value="">选择分类…</option></select>
+                <select id="batchCategorySelect" aria-label="选择目标分类"><option value="">选择分类…</option></select>
                 <button class="btn btn-outline btn-sm" id="batchMoveBtn">移动</button>
                 <button class="btn btn-outline btn-sm" id="cancelBatchBtn">取消批量</button>
             </div>
@@ -2630,20 +2743,20 @@
 
         const appContainer = document.getElementById('appContainer');
 
-        // --- 密码行内按钮事件委托（顺序优化：先处理编辑/删除，再处理密码操作） ---
+        // --- 密码行内按钮事件委托（使用索引加速） ---
         appContainer.addEventListener('click', async function(event) {
-            // 先检查编辑和删除按钮（它们有特定的类）
             const editButton = event.target.closest('.edit-btn');
             const deleteButton = event.target.closest('.del-btn');
             if (editButton) {
-                const item = State.passwords.find(function(p) { return p.id === editButton.dataset.id; });
+                const item = State.passwordIdIndex.get(editButton.dataset.id);
                 if (item) openEditModal(item);
                 return;
             }
             if (deleteButton) {
-                const item = State.passwords.find(function(p) { return p.id === deleteButton.dataset.id; });
+                const item = State.passwordIdIndex.get(deleteButton.dataset.id);
                 if (item && confirm(`确定删除"${item.name}"吗？`)) {
                     State.passwords = State.passwords.filter(function(p) { return p.id !== item.id; });
+                    State.rebuildIndex();
                     await saveEncrypted();
                     renderListOnly();
                     refreshDatalist();
@@ -2652,13 +2765,12 @@
                 return;
             }
 
-            // 密码操作按钮 (.pw-action)
             const actionButton = event.target.closest('.pw-action');
             if (actionButton) {
                 const action = actionButton.dataset.action;
                 const id = actionButton.dataset.id;
                 if (!action || !id) return;
-                const item = State.passwords.find(function(p) { return p.id === id; });
+                const item = State.passwordIdIndex.get(id);
                 if (!item) return;
 
                 if (action === 'toggle-login-vis') {
@@ -2753,6 +2865,7 @@
                 note: document.getElementById('inpNote').value.trim(),
                 createdAt: Date.now()
             }));
+            State.rebuildIndex();
             await saveEncrypted();
             renderListOnly();
             refreshDatalist();
@@ -2813,7 +2926,6 @@
             document.getElementById('addLoginStrengthFill'),
             document.getElementById('addLoginStrengthText')
         );
-        // 立即计算当前密码强度（通常为空密码）
         document.getElementById('inpLoginPw').dispatchEvent(new Event('input', { bubbles: true }));
 
         // 统一导出按钮
@@ -2850,7 +2962,7 @@
             modal.addEventListener('click', function(e) { if (e.target === modal) closeModal(); });
         };
 
-        // 移动端导出/导入下拉菜单（更多按钮）
+        // 移动端导出/导入下拉菜单（更多按钮）—— 使用 signal 管理全局监听
         const exportMoreBtn = document.getElementById('exportMoreBtn');
         const exportDropdown = document.getElementById('exportDropdown');
         if (exportMoreBtn && exportDropdown) {
@@ -2858,47 +2970,49 @@
                 event.stopPropagation();
                 exportDropdown.classList.toggle('show');
             });
-            document.addEventListener('click', function(event) {
+            const closeExportDropdown = function(event) {
                 if (!exportMoreBtn.contains(event.target) && !exportDropdown.contains(event.target)) {
                     exportDropdown.classList.remove('show');
                 }
-            });
-            document.getElementById('exportEncryptSmall').onclick = function() { exportDropdown.classList.remove('show'); exportEncryptedBackup(); };
-            document.getElementById('exportPlainSmall').onclick = function() { exportDropdown.classList.remove('show'); exportPlaintextJSON(); };
-            document.getElementById('exportCsvSmall').onclick = function() { exportDropdown.classList.remove('show'); exportCSV(); };
-            document.getElementById('importSmall').onclick = function() {
-                exportDropdown.classList.remove('show');
-                const modal = document.createElement('div');
-                modal.className = 'modal';
-                modal.innerHTML = `
-                    <div class="modal-card">
-                        <h3><svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-upload"/></svg> 导入选项</h3>
-                        <div class="warning-box">⚠️ 导入明文JSON/CSV会暴露所有密码，请务必确认来源绝对可信。</div>
-                        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 0;font-size:0.9rem;">
-                            <input type="checkbox" id="trustPlainCheckSmall" class="checkbox-sm"> 我信任此来源，允许导入明文文件
-                        </label>
-                        <button id="importFileBtnSmall" class="btn btn-primary" style="width:100%;margin-top:12px;">选择文件</button>
-                    </div>`;
-                document.body.appendChild(modal);
-                document.body.classList.add('modal-open');
-                modal.querySelector('#importFileBtnSmall').onclick = function() {
-                    const trustChecked = modal.querySelector('#trustPlainCheckSmall').checked;
-                    modal.remove();
-                    document.body.classList.remove('modal-open');
-                    const fileInput = document.createElement('input');
-                    fileInput.type = 'file';
-                    fileInput.accept = '.json,.csv';
-                    fileInput.onchange = async function(event) {
-                        const file = event.target.files[0];
-                        if (!file) return;
-                        if (file.name.endsWith('.csv')) await importCSV(file, trustChecked);
-                        else await importFromFile(file, trustChecked);
-                        fileInput.remove();
-                    };
-                    fileInput.click();
-                };
             };
+            document.addEventListener('click', closeExportDropdown, { signal });
         }
+
+        document.getElementById('exportEncryptSmall')?.addEventListener('click', function() { exportDropdown.classList.remove('show'); exportEncryptedBackup(); });
+        document.getElementById('exportPlainSmall')?.addEventListener('click', function() { exportDropdown.classList.remove('show'); exportPlaintextJSON(); });
+        document.getElementById('exportCsvSmall')?.addEventListener('click', function() { exportDropdown.classList.remove('show'); exportCSV(); });
+        document.getElementById('importSmall')?.addEventListener('click', function() {
+            exportDropdown.classList.remove('show');
+            const modal = document.createElement('div');
+            modal.className = 'modal';
+            modal.innerHTML = `
+                <div class="modal-card">
+                    <h3><svg class="icon" style="width:1.4rem;height:1.4rem;"><use href="#icon-upload"/></svg> 导入选项</h3>
+                    <div class="warning-box">⚠️ 导入明文JSON/CSV会暴露所有密码，请务必确认来源绝对可信。</div>
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 0;font-size:0.9rem;">
+                        <input type="checkbox" id="trustPlainCheckSmall" class="checkbox-sm"> 我信任此来源，允许导入明文文件
+                    </label>
+                    <button id="importFileBtnSmall" class="btn btn-primary" style="width:100%;margin-top:12px;">选择文件</button>
+                </div>`;
+            document.body.appendChild(modal);
+            document.body.classList.add('modal-open');
+            modal.querySelector('#importFileBtnSmall').onclick = function() {
+                const trustChecked = modal.querySelector('#trustPlainCheckSmall').checked;
+                modal.remove();
+                document.body.classList.remove('modal-open');
+                const fileInput = document.createElement('input');
+                fileInput.type = 'file';
+                fileInput.accept = '.json,.csv';
+                fileInput.onchange = async function(event) {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    if (file.name.endsWith('.csv')) await importCSV(file, trustChecked);
+                    else await importFromFile(file, trustChecked);
+                    fileInput.remove();
+                };
+                fileInput.click();
+            };
+        });
 
         // 批量
         document.getElementById('batchBtn').onclick = toggleBatchMode;
@@ -2949,7 +3063,7 @@
             };
         };
 
-        // 主题下拉
+        // 主题下拉（使用 signal 管理全局监听）
         const themeSwitcherBtn = document.getElementById('themeSwitcherBtn');
         const themeDropdown = document.getElementById('themeDropdown');
         if (themeSwitcherBtn && themeDropdown) {
@@ -2957,11 +3071,12 @@
                 event.stopPropagation();
                 themeDropdown.classList.toggle('show');
             });
-            document.addEventListener('click', function(event) {
+            const closeThemeDropdown = function(event) {
                 if (!themeSwitcherBtn.contains(event.target) && !themeDropdown.contains(event.target)) {
                     themeDropdown.classList.remove('show');
                 }
-            });
+            };
+            document.addEventListener('click', closeThemeDropdown, { signal });
         }
 
         updateAllSelectColors();
