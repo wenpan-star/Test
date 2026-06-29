@@ -90,6 +90,12 @@
                 --success: #34d399;
                 --placeholder-color: #6a788b;
             }
+            .btn {
+                border-color: rgba(255, 255, 255, 0.12);
+            }
+            .btn:hover {
+                border-color: var(--primary);
+            }
         }
 
         * {
@@ -226,7 +232,9 @@
             }
 
             input:focus, select:focus, textarea:focus {
-                background: rgba(0, 0, 0, 0.3);
+                background: rgba(255, 255, 255, 0.05);
+                border-color: var(--primary);
+                box-shadow: 0 0 0 4px var(--primary-light);
             }
         }
 
@@ -761,7 +769,7 @@
 
         .toast {
             position: fixed;
-            bottom: 36px;
+            bottom: calc(36px + var(--safe-area-bottom));
             left: 50%;
             transform: translateX(-50%);
             background: #1e293b;
@@ -797,6 +805,12 @@
 
         @media (prefers-color-scheme: dark) {
             .warning-box { background: #2f2412; color: #fadf8a; }
+            .password-item:hover {
+                border-color: var(--primary);
+            }
+            .cat-tag button:hover {
+                background: rgba(248, 113, 113, 0.25);
+            }
         }
 
         .highlight {
@@ -805,6 +819,13 @@
             border-radius: 4px;
             padding: 0 3px;
             font-weight: 600;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .highlight {
+                background-color: #4a3a0a;
+                color: #fbbf24;
+            }
         }
 
         .batch-bar {
@@ -896,6 +917,11 @@
             .modal-card { max-width: 92vw; max-height: 90vh; padding: 1.8rem; }
             .pw-text-input { min-width: 12ch; }
             .cat-grid { grid-template-columns: 1fr 1fr; }
+            .password-item:hover {
+                transform: none;
+                box-shadow: var(--shadow-sm);
+                border-color: rgba(0, 0, 0, 0.04);
+            }
         }
 
         @media (max-width: 380px) {
@@ -905,6 +931,9 @@
             .logo svg { width: 2rem; height: 2rem; }
             .pw-text-input { min-width: 10ch; }
             .cat-grid { grid-template-columns: 1fr; }
+            .search-bar { flex-wrap: wrap; }
+            .search-bar input { flex: 1 1 100%; }
+            .search-bar select { flex: 1 1 auto; max-width: none; min-width: 0; }
         }
         /* 原有 380px 媒体查询后面新增一个 */
         @media (max-height: 500px) and (orientation: landscape) {
